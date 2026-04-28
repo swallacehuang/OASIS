@@ -1,0 +1,189 @@
+name: OASIS Fortune-500 CI
+
+on:
+  push:
+    branches: [main, master, develop]
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+concurrency:
+  group: oasis-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+
+# ==========================================================
+# QUALITY GATE
+# ==========================================================
+  quality:
+    name: Quality Gate (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Upgrade tooling
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+
+      - name: Install dependencies
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+          pip install \
+            pytest \
+            pytest-cov \
+            ruff \
+            black \
+            isort \
+            build \
+            pip-audit \
+            twine
+
+          if [ -f pyproject.toml ] || [ -f setup.py ]; then
+            pip install -e .
+          fi
+
+      - name: Lint (Ruff)
+        run: ruff check .
+
+      - name: Format Check (Black)
+        run: black --check .
+
+      - name: Import Order (isort)
+        run: isort . --check-only
+
+      - name: Verify tests exist
+        run: test -d tests
+
+      - name: Run tests
+        run: pytest -v --cov=. --cov-report=xml --cov-report=term-missing
+
+      - name: Build package
+        run: python -m build
+
+      - name: Verify distribution
+        run: twine check dist/*
+
+      - name: Dependency Audit
+        run: pip-audit --strict
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.python-version }}
+          path: coverage.xml
+          if-no-files-found: ignore
+
+      - name: Upload dist
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.python-version }}
+          path: dist/
+          if-no-files-found: ignore
+
+# ==========================================================
+# CODEQL SECURITY
+# ==========================================================
+  codeql:
+    name: CodeQL Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: quality
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: python
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v4
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+
+# ==========================================================
+# RELEASE (Tag Push Only)
+# ==========================================================
+  release:
+    name: Publish Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [quality, codeql]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-3.11
+          path: dist
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*
+
+# ==========================================================
+# NIGHTLY HEALTH CHECK
+# ==========================================================
+  nightly:
+    if: github.event_name == 'workflow_dispatch'
+    name: Nightly Dependency Health
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install --upgrade pip
+      - run: if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - run: pip install pip-audit
+      - run: pip-audit
