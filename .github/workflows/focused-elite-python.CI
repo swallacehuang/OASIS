@@ -1,0 +1,85 @@
+name: Focused Elite Python CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: focused-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-linux:
+    name: Python ${{ matrix.python-version }} • Ubuntu
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Miniconda
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: true
+          python-version: ${{ matrix.python-version }}
+          activate-environment: focused
+          environment-file: environment.yml
+          auto-activate-base: false
+
+      - name: Show Environment Info
+        shell: bash -l {0}
+        run: |
+          conda info
+          conda list
+          python --version
+
+      - name: Install QA Tooling
+        shell: bash -l {0}
+        run: |
+          conda install -y flake8 pytest pip
+          python -m pip install --upgrade pip
+
+      - name: Lint (Critical Errors)
+        shell: bash -l {0}
+        run: |
+          flake8 . \
+            --count \
+            --select=E9,F63,F7,F82 \
+            --show-source \
+            --statistics
+
+      - name: Lint (Style Report)
+        shell: bash -l {0}
+        run: |
+          flake8 . \
+            --count \
+            --exit-zero \
+            --max-complexity=10 \
+            --max-line-length=127 \
+            --statistics
+
+      - name: Run Tests
+        shell: bash -l {0}
+        run: |
+          pytest -v --maxfail=3
+
+      - name: Upload Test Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: focused-test-results-${{ matrix.python-version }}
+          path: |
+            .pytest_cache
+          if-no-files-found: ignore
